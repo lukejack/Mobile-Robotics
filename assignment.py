@@ -16,103 +16,110 @@ from geometry_msgs.msg import Twist
 
 class Follower:
   def __init__(self):
+    
+    #Libraries
     self.bridge = cv_bridge.CvBridge()
     cv2.namedWindow("window", 1)
-    self.image_sub = rospy.Subscriber('/turtlebot/camera/rgb/image_raw', 
-                                      Image, self.image_callback)
-    self.cmd_vel_pub = rospy.Publisher('/turtlebot/cmd_vel_mux/input/teleop',
-                                       Twist, queue_size=1)
-                                       
-    self.scan = rospy.Subscriber('/turtlebot/scan', LaserScan, self.scan_callback)
-                                      
-    self.scan_data = None
     self.twist = Twist()
-    self.twist_time = 0
-    self.forward_velocity = 1
-    self.opening_find = False
-    self.opening_time = 0
+    self.time = time
     
+    #Constants
+    self.image_width = 640
+    self.image_height = 480
+    self.seen_angular = 0.3
+    self.search_angular = 0.8
+    self.forward_velocity = 0.7
     
-  def scan_callback(self, data):
-      self.scan_data = data.ranges
-      #if (data.ranges[320] < 0.)
-
-  def spin_find(self, bgr):
-      #print time.time() - self.twist_time
-      #Get image dimensions
-      height, width, depth = bgr.shape
+    #Colour slicing
+    self.colours = {'red': {'found': False, 'min': numpy.array((0, 0, 1)), 'max': numpy.array((0, 0, 255))},
+                    'blue': {'found': False, 'min': numpy.array((1, 0, 0)), 'max': numpy.array((255, 0, 0))},
+                    'yellow': {'found': False, 'min': numpy.array((100, 100, 0)), 'max': numpy.array((255, 255, 0))},
+                    'green': {'found': False, 'min': numpy.array((0, 1, 0)), 'max': numpy.array((0, 255, 0))}}
+        
+    self.red_found = False
+    self.blue_found = False
+    self.yellow_found = False
+    self.green_found = False
+    
+    #ROS Topics
+    self.image_sub = rospy.Subscriber('/turtlebot/camera/rgb/image_raw', Image, self.image_callback)
+    self.cmd_vel_pub = rospy.Publisher('/turtlebot/cmd_vel_mux/input/teleop', Twist, queue_size=1)        
+    self.scan = rospy.Subscriber('/turtlebot/scan', LaserScan, self.scan_callback, queue_size=5)
+    
+    #Sensor data
+    self.scan_data = None
+    self.max_depth = 0
+    
+    #Modes: 0 - spin_search, 1 - move_found, 2 - move_search
+    self.mode = 1
+    self.timer = 0
+    
+  def main(self, bgr):
+      #Get moments by colour slicing
+      coords = []
+      for key, value in self.colours.iteritems():
+          if (value['found'] == False):
+              coords.append([key, cv2.moments(cv2.inRange(bgr, value['min'], value['max']))])
       
-      hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
-      
-      #Find red objects
-      red_mask = cv2.inRange(bgr, numpy.array((0, 0, 1)), numpy.array((0, 0, 255)))
-      blue_mask = cv2.inRange(bgr, numpy.array((1, 0, 0)), numpy.array((255, 0, 0)))
-      yellow_mask = cv2.inRange(bgr, numpy.array((100, 100, 0)), numpy.array((255, 255, 0)))
-      green_mask = cv2.inRange(bgr, numpy.array((0, 1, 0)), numpy.array((0, 255, 0)))
-      
-      #If has moved through the opening for 2 seconds
-      if ((self.opening_time != 0) & self.opening_find & ((time.time() - self.opening_time) > 2)):
-          print "spinning again"
-          self.opening_time = 0
-          self.opening_find = False
-          
-      #Clear path found
-      if (self.opening_find):
-          print "path found"
-          scan_temp = self.scan_data
-          average_depth = 0
-          for i in range(310, 330):
-              if (math.isnan(scan_temp[i])):
-                  continue
-              average_depth = average_depth + scan_temp[i]
-         
-          average_depth = average_depth // 20
-          if (average_depth > 3):
-              self.opening_time = time.time()
-              self.twist.linear.x = self.forward_velocity
-              self.twist.angular.z = 0
-          
-      else:
-          #Get center of red objects
-          moments = cv2.moments(red_mask)
-          angular_vel = 1
-          total_spin = 0
-          
-          #If an object has been found
-          if moments['m00'] > 0:
-              self.twist_start = 0
-              total_spin = 0
-              angle = 0
-              cx = int(moments['m10']/moments['m00'])
-              cy = int(moments['m01']/moments['m00'])  
-              if (cx < width/2):
-                  angle = 0.3
+      #Check for each colour post
+      for colour in coords:
+          #If object seen
+          if colour[1]['m00'] > 0:
+              self.max_depth = 0
+              self.mode = 1
+              cx = int(colour[1]['m10']/colour[1]['m00'])
+              if (self.scan_data[320] < 0.8):
+                  print 'Found ', colour[0], '!'
+                  self.colours[colour[0]]['found'] = True
+              if (cx < self.image_width/2):
+                  self.twist.angular.z = self.seen_angular
               else:
-                  angle = -0.3
+                  self.twist.angular.z = -self.seen_angular
               self.twist.linear.x = self.forward_velocity
-              self.twist.angular.z = angle
+              self.cmd_vel_pub.publish(self.twist)
+              break
+          
           #Nothing visible
           else:
-              if (self.twist_time == 0):
-                  self.twist_time = time.time()
-              if ((time.time() - self.twist_time) > numpy.pi + 0.3):
-                  #A full turn has revealed no cylinders
-                  self.twist_time = 0
-                  self.opening_find = True
-                  print 'No cylinders, finding openings'
-                  
-              #Start twisting on the spot
-              self.twist.linear.x = 0
-              self.twist.angular.z = angular_vel
-      
-      self.cmd_vel_pub.publish(self.twist)
+              #If there are none of any colour
+              if (colour[0] == coords[-1][0]):
+                  if (self.mode == 2):
+                      self.twist.linear.x = self.forward_velocity
+                      self.twist.angular.z = 0
+                      if (self.scan_data[320] < 1):
+                          self.mode = 0
+                      else:
+                          self.cmd_vel_pub.publish(self.twist)
+                  else:
+                      if (self.mode != 0):
+                          self.max_depth = 0
+                          self.mode = 0
+                          self.timer = self.time.time()
+                      if ((self.mode == 0) & ((self.time.time() - self.timer) > 1.6 * numpy.pi + 1)):
+                          if (self.scan_data[320] > self.max_depth - 0.3):
+                              #START TIMER
+                              self.mode = 2
+                          #go to deepest point
+                          
+                      self.twist.linear.x = 0
+                      self.twist.angular.z = self.search_angular
+                      
+                      self.cmd_vel_pub.publish(self.twist)
+
+      print "Mode: ", self.mode
+      print "Max_depth: ", self.max_depth
       cv2.imshow("window", bgr)
-      cv2.waitKey(3)
+      cv2.waitKey(3) 
+  
+  
+  def scan_callback(self, data):
+      self.scan_data = data.ranges
+      if ((self.mode == 0) & (data.ranges[320] > self.max_depth)):
+          self.max_depth = data.ranges[320]
       
   def image_callback(self, msg):
     image = self.bridge.imgmsg_to_cv2(msg,desired_encoding='bgr8')
-    (rows, cols, channels) = image.shape
-    self.spin_find(image)
+    self.main(image)
 
 
 rospy.init_node('follower')

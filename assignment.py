@@ -29,6 +29,8 @@ class Follower:
     self.seen_angular = 0.3
     self.search_angular = 0.8
     self.forward_velocity = 1
+    self.obs_scan_start = 100
+    self.obs_scan_end = 390
     
     #Colour slicing
     self.colours = {'red': {'found': False, 'min': numpy.array((0, 0, 1)), 'max': numpy.array((0, 0, 255))},
@@ -42,9 +44,9 @@ class Follower:
     self.green_found = False
     
     #ROS Topics
-    self.image_sub = rospy.Subscriber('/turtlebot/camera/rgb/image_raw', Image, self.image_callback)
-    self.cmd_vel_pub = rospy.Publisher('/turtlebot/cmd_vel_mux/input/teleop', Twist, queue_size=1)        
-    self.scan = rospy.Subscriber('/turtlebot/scan', LaserScan, self.scan_callback, queue_size=5)
+    self.image_sub = rospy.Subscriber('/turtlebot/camera/rgb/image_raw', Image, self.image_callback, queue_size=10)
+    self.cmd_vel_pub = rospy.Publisher('/turtlebot/cmd_vel_mux/input/teleop', Twist, queue_size=10)        
+    self.scan = rospy.Subscriber('/turtlebot/scan', LaserScan, self.scan_callback, queue_size=10)
     
     #Sensor data
     self.scan_data = None
@@ -52,6 +54,7 @@ class Follower:
     
     #Modes: 0 - spin_search, 1 - move_found, 2 - move_search, 3 - avoid obstruction
     self.mode = 1
+    self.mode_3_direction = None
     self.timer = 0
     self.obstruction_timer = 0
     
@@ -75,15 +78,22 @@ class Follower:
                       else:
                           print 'Correction: Turning back'
                           self.twist.linear.x = 0
-                          self.twist.angular.x = -self.search_angular
+                          if (self.mode_3_direction == 1):
+                              self.twist.angular.x = -self.search_angular
+                          if (self.mode_3_direction == 2):
+                              self.twist.angular.x = self.search_angular
                   else:
                       print 'Correction: Moving forwards'
                       self.twist.angular.x = 0
                       self.twist.linear.x = self.forward_velocity
               else:
-                  print 'Correction: Turning sideways'
                   self.twist.linear.x = 0
-                  self.twist.angular.x = self.search_angular
+                  if (self.mode_3_direction == 1):
+                      self.twist.angular.x = self.search_angular
+                      print "Turning to the right"
+                  if (self.mode_3_direction == 2):
+                      self.twist.angular.x = -self.search_angular
+                      print "Turning to the left"
           else:
               print 'Correction: Moving backwards'
               self.twist.linear.x = -self.forward_velocity
@@ -114,8 +124,12 @@ class Follower:
                       print 'Found ', colour[0], '!'
                       self.colours[colour[0]]['found'] = True
                   else:
-                      if (self.obstruction()):
-                          print "I'm obstructed"
+                      obs = self.obstruction()
+                      if obs:
+                          self.mode_3_direction = obs
+                          self.mode = 3
+                         
+                          
                       
                   #Move to the lef / right
                   self.twist.angular.z =  -float(cx - self.image_width / 2) / 100 
@@ -134,7 +148,8 @@ class Follower:
                           self.twist.linear.x = self.forward_velocity
                           self.twist.angular.z = 0
                           #If has an obstruction
-                          if (self.obstruction()):
+                          obs = self.obstruction()
+                          if obs:
                               #Start searching again
                               self.twist.linear.x = 0
                               self.mode = 1
@@ -173,14 +188,56 @@ class Follower:
   
   def scan_callback(self, data):
       self.scan_data = data.ranges
-      if ((self.mode == 0) & (data.ranges[320] > self.max_depth)):
+      if ((self.mode == 0) & (data.ranges[320] > self.max_depth) ):
           self.max_depth = data.ranges[320]
           
   def obstruction(self):
-      for p in range(50, 429):
-         if (self.scan_data[p] < 1):
-             return True
-      return False
+      obs = False
+      
+      for p in range(self.obs_scan_start, self.obs_scan_end):
+          if (self.scan_data[p] < 1):
+              obs = True
+              break;
+      
+      if obs:
+          obs_left_average = 0
+          obs_right_average = 0
+          scan_range = (self.obs_scan_end - self.obs_scan_start)
+          for p in range(self.obs_scan_start, 240):
+              if math.isnan(self.scan_data[p]) or (self.scan_data[p] > 1) :
+                  scan_range -= 1
+                  continue
+              else:
+                  obs_right_average += self.scan_data[p]
+          obs_right_average /= scan_range
+          
+          
+          scan_range = (self.obs_scan_end - self.obs_scan_start)
+          for p in range(241, self.obs_scan_end):
+              if math.isnan(self.scan_data[p]) or (self.scan_data[p] > 1) :
+                  scan_range -= 1
+                  continue
+              else:
+                  obs_left_average += self.scan_data[p]
+                  
+          obs_left_average /= scan_range
+          
+          #print "Obs right average: ", obs_right_average
+          #print "Obs left average: ", obs_left_average
+          
+          obs_diff = obs_right_average - obs_left_average
+          
+          if (obs_diff > 0.1):
+              print "Right obstruction"
+              return 2
+          if (obs_diff < -0.1):
+              print "Left obstruction"
+              return 1
+          if ((obs_diff < 0.2) & (obs_diff > -0.2)):
+              print "Front obstruction"
+              return 3
+      else:
+          return False
       
   def image_callback(self, msg):
     image = self.bridge.imgmsg_to_cv2(msg,desired_encoding='bgr8')
